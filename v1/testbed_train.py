@@ -20,6 +20,8 @@ if __name__ == '__main__':
 
     max_m_episode = 800_000
     max_steps = 800
+    use_entropy = True  # Toggle SAC-style training
+    alpha = 0.001      # Entropy regularization coefficient
 
     env = Rocket(task=task, max_steps=max_steps)
     ckpt_folder = os.path.join('./', task + '_ckpt')
@@ -28,13 +30,19 @@ if __name__ == '__main__':
 
     last_episode_id = 0
     REWARDS = []
-    print(env.state_dims, 'states', env.action_dims, 'actions')
+    print(f"{env.state_dims} states, {env.action_dims} actions")
+    print(f"Using {'SAC' if use_entropy else 'A2C'} style training")
 
-    net = ActorCritic(input_dim=env.state_dims, output_dim=env.action_dims).to(device)
+    net = ActorCritic(
+        input_dim=env.state_dims,
+        output_dim=env.action_dims,
+        use_entropy=use_entropy
+    ).to(device)
 
     if not FROM_ZERO and len(glob.glob(os.path.join(ckpt_folder, '*.pt'))) > 0:
         # load the last ckpt
-        checkpoint = torch.load(glob.glob(os.path.join(ckpt_folder, '*.pt'))[-1], weights_only=False, map_location=device)
+        checkpoint = torch.load(glob.glob(os.path.join(ckpt_folder, '*.pt'))[-1],
+                              weights_only=False, map_location=device)
         net.load_state_dict(checkpoint['model_G_state_dict'])
         last_episode_id = checkpoint['episode_id']
         REWARDS = checkpoint['REWARDS']
@@ -43,12 +51,12 @@ if __name__ == '__main__':
         # training loop
         state = env.reset()
         rewards, log_probs, values, masks = [], [], [], []
-        net.entropy_buffer = []  # Reset entropy buffer for each episode
+        episode_entropy = []  # Track entropy for monitoring
 
         for step_id in range(max_steps):
-            # Get action and store entropy
+            # Get action and entropy
             action, log_prob, value, entropy = net.get_action(state)
-            net.entropy_buffer.append((action, log_prob, value, entropy))
+            episode_entropy.append(entropy.item())
 
             # Take step in environment
             state, reward, done, _ = env.step(action)
@@ -66,13 +74,17 @@ if __name__ == '__main__':
                 # Get bootstrap value for incomplete episode
                 _, _, value, _ = net.get_action(state)
 
-                # Update policy with entropy regularization
-                loss_info = net.update_ac(net, rewards, log_probs, values, masks, value, gamma=0.999)
+                # Update policy
+                loss_info = net.update_ac(net, rewards, log_probs, values, masks, value,
+                                        gamma=0.999, alpha=alpha)
 
                 if episode_id % 100 == 1:
+                    avg_entropy = np.mean(episode_entropy)
+                    print(f"Episode {episode_id}")
                     print(f"Losses - Actor: {loss_info['actor_loss']:.3f}, "
                           f"Critic: {loss_info['critic_loss']:.3f}, "
                           f"Entropy: {loss_info['entropy_loss']:.3f}")
+                    print(f"Average entropy: {avg_entropy:.3f}")
                 break
 
         REWARDS.append(np.sum(rewards))
@@ -89,7 +101,10 @@ if __name__ == '__main__':
                 plt.savefig(os.path.join(ckpt_folder, 'rewards_' + str(episode_id).zfill(8) + '.jpg'))
                 plt.close()
 
-            torch.save({'episode_id': episode_id,
-                       'REWARDS': REWARDS,
-                       'model_G_state_dict': net.state_dict()},
-                      os.path.join(ckpt_folder, 'ckpt_' + str(episode_id).zfill(8) + '.pt'))
+            torch.save({
+                'episode_id': episode_id,
+                'REWARDS': REWARDS,
+                'model_G_state_dict': net.state_dict(),
+                'use_entropy': use_entropy,
+                'alpha': alpha
+            }, os.path.join(ckpt_folder, 'ckpt_' + str(episode_id).zfill(8) + '.pt'))

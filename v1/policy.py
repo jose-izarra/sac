@@ -32,6 +32,21 @@ def calculate_returns(next_value, rewards, masks, gamma=0.99):
     return returns
 
 
+def compute_entropy(probs):
+    """
+    Compute the entropy of a probability distribution.
+
+    Args:
+        probs: Probability distribution tensor
+
+    Returns:
+        Entropy of the distribution
+    """
+    # Add small epsilon to avoid log(0)
+    eps = 1e-8
+    return -(probs * torch.log(probs + eps)).sum()
+
+
 class PositionalMapping(nn.Module):
     """
     Positional mapping Layer.
@@ -99,26 +114,30 @@ class MLP(nn.Module):
 
 
 GAMMA = 0.99
-ENTROPY_COEF = 0.01  # Entropy coefficient (β) controls exploration-exploitation trade-off
+ENTROPY_COEF = 0.001  # Default entropy coefficient (α) for SAC
 
 class ActorCritic(nn.Module):
     """
-    Actor-Critic implementation with entropy regularization.
+    Actor-Critic implementation with optional entropy regularization (SAC-style).
 
     The actor (policy network) outputs action probabilities and the critic (value network)
-    estimates state values. Entropy regularization is added to encourage exploration.
+    estimates state values. Optional entropy regularization can be used to encourage
+    exploration (as in Soft Actor-Critic).
 
     Args:
         input_dim: Dimension of state space
         output_dim: Dimension of action space (number of discrete actions)
-        hidden_layers: Number of hidden layers in both actor and critic networks
+        hidden_layers: Number of hidden layers in both networks
         hidden_size: Number of units in each hidden layer
         L: Positional encoding parameter (0 for no encoding)
-        learning_rate: Learning rate for RMSprop optimizer
+        learning_rate: Learning rate for optimizer
+        use_entropy: Whether to use entropy regularization (SAC-style)
     """
-    def __init__(self, input_dim, output_dim, hidden_layers=2, hidden_size=128, L=7, learning_rate=5e-5):
+    def __init__(self, input_dim, output_dim, hidden_layers=2, hidden_size=128, L=7,
+                 learning_rate=5e-5, use_entropy=True):
         super().__init__()
         self.output_dim = output_dim
+        self.use_entropy = use_entropy  # Flag to toggle entropy regularization
 
         # Actor and Critic networks
         self.actor = MLP(input_dim=input_dim, output_dim=output_dim,
@@ -129,10 +148,7 @@ class ActorCritic(nn.Module):
         self.optimizer = optim.RMSprop(self.parameters(), lr=learning_rate)
 
     def forward(self, x):
-        """
-        Forward pass through both actor and critic networks.
-        Returns action probabilities and state value estimate.
-        """
+        """Forward pass through both networks."""
         action_logits = self.actor(x)
         probs = self.softmax(action_logits)
         value = self.critic(x)
@@ -140,7 +156,7 @@ class ActorCritic(nn.Module):
 
     def get_action(self, state, deterministic=False, exploration=0.01):
         """
-        Select an action based on the current policy.
+        Select an action using the current policy.
 
         Args:
             state: Current environment state
@@ -151,20 +167,20 @@ class ActorCritic(nn.Module):
             action_id: Selected action
             log_prob: Log probability of selected action
             value: Value estimate of current state
-            entropy: Entropy of the action distribution (for regularization)
+            entropy: Entropy of the action distribution
         """
         state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
         probs, value = self.forward(state)
         probs = probs[0, :]
         value = value[0]
 
-        # Create a proper probability distribution
+        # Create categorical distribution
         dist = Categorical(probs)
 
         if deterministic:
             action_id = probs.argmax().item()
         else:
-            if random.random() < exploration:  # epsilon-greedy exploration
+            if random.random() < exploration:  # epsilon-greedy
                 action_id = random.randint(0, self.output_dim - 1)
             else:
                 action_id = dist.sample().item()
@@ -175,44 +191,60 @@ class ActorCritic(nn.Module):
         return action_id, log_prob, value, entropy
 
     @staticmethod
-    def update_ac(network, rewards, log_probs, values, masks, Qval, gamma=GAMMA):
+    def update_ac(network, rewards, log_probs, values, masks, Qval, gamma=GAMMA, alpha=ENTROPY_COEF):
         """
-        Update actor and critic networks using collected experience.
+        Updates the Actor-Critic network using collected experience.
 
-        Implements A2C with entropy regularization:
-        - Actor Loss = -log_prob * advantage - β * entropy
-        - Critic Loss = 0.5 * advantage²
-        - Total Loss = Actor Loss + Critic Loss
+        This implements a policy gradient method with two components:
+        1. Actor: Policy network that decides which actions to take
+        2. Critic: Value network that estimates the expected return
+
+        The implementation can switch between standard A2C and SAC-style training
+        by toggling the use_entropy flag.
 
         Args:
             network: ActorCritic network to update
-            rewards: List of rewards from episode
-            log_probs: List of log probabilities of taken actions
-            values: List of value estimates
-            masks: List of done masks (0 for terminal states)
+            rewards: List of rewards from trajectory
+            log_probs: Log probabilities of taken actions
+            values: Value estimates from critic
+            masks: Binary masks (0 for terminal states)
             Qval: Bootstrap value for incomplete episode
             gamma: Discount factor
+            alpha: Entropy regularization coefficient
+
+        Implementation Details:
+        1. Q-values: Computed using Bellman equation with bootstrapping
+        2. Advantage: Q(s,a) - V(s) as baseline reduction
+        3. Actor Loss: Policy gradient with optional entropy regularization
+        4. Critic Loss: MSE between value estimates and Q-values
+        5. Combined Loss: Weighted sum of actor and critic losses
         """
-        # Compute Q values and advantages
+        # Compute Q-values and advantages
         Qvals = calculate_returns(Qval.detach(), rewards, masks, gamma=gamma)
         Qvals = torch.tensor(Qvals, dtype=torch.float32).to(device).detach()
 
-        # Stack collected tensors
-        log_probs = torch.stack(log_probs)
-        values = torch.stack(values)
+        # Stack tensors if needed
+        if isinstance(log_probs, list):
+            log_probs = torch.stack(log_probs)
+        if isinstance(values, list):
+            values = torch.stack(values)
 
-        # Get policy distribution and compute entropy
+        # Compute advantage
         advantage = Qvals - values
 
-        # Compute losses with entropy regularization
-        actor_loss = (-log_probs * advantage.detach()).mean()
+        # Compute entropy if using SAC-style training
+        if network.use_entropy:
+            probs = torch.exp(log_probs).detach()
+            entropy = compute_entropy(probs)
+            actor_loss = (-log_probs * advantage.detach()).mean() - alpha * entropy
+        else:
+            actor_loss = (-log_probs * advantage.detach()).mean()
+
+        # Critic loss (MSE)
         critic_loss = 0.5 * advantage.pow(2).mean()
 
-        # Add entropy bonus (entropy maximization encourages exploration)
-        entropy_loss = -ENTROPY_COEF * torch.stack([step_output[3] for step_output in network.entropy_buffer]).mean()
-
         # Combined loss
-        total_loss = actor_loss + critic_loss + entropy_loss
+        total_loss = actor_loss + critic_loss
 
         # Optimize
         network.optimizer.zero_grad()
@@ -222,6 +254,6 @@ class ActorCritic(nn.Module):
         return {
             'actor_loss': actor_loss.item(),
             'critic_loss': critic_loss.item(),
-            'entropy_loss': entropy_loss.item(),
+            'entropy_loss': -alpha * entropy.item() if network.use_entropy else 0.0,
             'total_loss': total_loss.item()
         }
