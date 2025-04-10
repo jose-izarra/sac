@@ -175,7 +175,6 @@ class ActorCritic(nn.Module):
         advantage = Qvals - values
         actor_loss = (-log_probs * advantage.detach()).mean()
         critic_loss = 0.5 * advantage.pow(2).mean()
-        ac_loss = actor_loss + critic_loss
 
         ac_loss = actor_loss + critic_loss - entropy_beta * entropy
 
