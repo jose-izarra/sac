@@ -193,28 +193,35 @@ class ActorCritic(nn.Module):
     @staticmethod
     def update_ac(network, rewards, log_probs, values, masks, Qval, gamma=GAMMA, alpha=ENTROPY_COEF):
         """
-        Updates the actor-critic network using collected trajectory data.
+        The Actor-Critic models are based on two main components:
+        1. The actor, which is responsible for selecting actions based on the current state and learning the policy through a probability distribution
+        2. The critic, which evaluates the action taken by the actor and provides feedback on its performance by estimating the value function
 
-        This function implements the policy gradient update for both actor and critic networks.
-        It supports both standard A2C (Advantage Actor-Critic) and SAC-style (Soft Actor-Critic)
-        training with entropy regularization.
+        This method is an on-policy method, meaning that it uses the current policy to generate the actions and then updates the policy based on those
+        actions by using policy gradient methods and temporal-difference learning for the updating of the value function
+
+        Here, we can see the entropy regularization used to encourage exploration during the learning process and to prevent the policy from becoming too deterministic early on
+        We can define the entropy regularization term as:
+        H(π) = -Σa∈A π(a|s) log(π(a|s))
+
+        where π(a|s) is the probability of taking action a in state s according to the policy (probability distribution) π.
+        Adding an entropy term (β·H(π)) to the actor loss would lead to the following loss function:
+        actor_loss = -Σa∈A π(a|s) log(π(a|s)) * (Q(s,a) - V(s)) + β·H(π)
+
+        where Q(s,a) is the action-value function and V(s) is the state-value function. The β parameter controls the strength of the entropy regularization term.
+
+        The critic loss is simpler and can be calculated as 0.5 * advantage²
+
+        Finally, the total loss is calculated by adding all the losses (actor_loss + critic_loss + entropy_loss
 
         Args:
-            network: The actor-critic network to update
-            rewards: List of rewards collected during the episode
-            log_probs: Log probabilities of actions taken during the episode
-            values: Value estimates from the critic network for each state
-            masks: Binary masks indicating non-terminal states (1) vs terminal states (0)
-            Qval: Bootstrap value estimate for the final state
-            gamma: Discount factor for future rewards (default: GAMMA)
-            alpha: Entropy regularization coefficient (default: ENTROPY_COEF)
-
-        Returns:
-            Dictionary containing loss information:
-                - actor_loss: Loss value for the actor network
-                - critic_loss: Loss value for the critic network
-                - entropy_loss: Entropy regularization loss (if using SAC-style training)
-                - total_loss: Combined loss used for optimization
+            network: ActorCritic network to update
+            rewards: List of rewards from episode
+            log_probs: List of log probabilities of taken actions
+            values: List of value estimates
+            masks: List of done masks (0 for terminal states)
+            Qval: Bootstrap value for incomplete episode
+            gamma: Discount factor
         """
         # Compute Q-values and advantages
         Qvals = calculate_returns(Qval.detach(), rewards, masks, gamma=gamma)
