@@ -1,35 +1,38 @@
+import numpy as np
 import torch
 from rocket import Rocket
 from policy import ActorCritic
+import matplotlib.pyplot as plt
+import utils
 import os
 import glob
 
 # Decide which device we want to run on
-# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-device = torch.device("cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+print('device:', device)
 
 if __name__ == '__main__':
-
-    # task = 'hover'   # 'hover' or 'landing'
+    task = 'hover'   # 'hover' or 'landing'
     task = 'landing' # 'hover' or 'landing'
-
     max_steps = 800
-    ckpt_dir = glob.glob(os.path.join(task+'_ckpt', '*.pt'))
-    if ckpt_dir: ckpt_dir = ckpt_dir[-1]  # last ckpt
-    print(ckpt_dir)
 
     env = Rocket(task=task, max_steps=max_steps)
+    ckpt_folder = os.path.join('./', task + '_ckpt')
+
+    print(f"{env.state_dims} states, {env.action_dims} actions")
 
     net = ActorCritic(input_dim=env.state_dims, output_dim=env.action_dims).to(device)
-    if ckpt_dir and os.path.exists(ckpt_dir):
-        # Load checkpoint and map tensors to CPU
-        checkpoint = torch.load(ckpt_dir, weights_only=False, map_location=device)
-        net.load_state_dict(checkpoint['model_G_state_dict'])
+
+    # load the last ckpt
+    checkpoint = torch.load(glob.glob(os.path.join(ckpt_folder, '*.pt'))[-1],
+                          weights_only=False, map_location=device)
+    net.load_state_dict(checkpoint['model_G_state_dict'])
 
     state = env.reset()
-    for step_id in range(max_steps):
-        action, log_prob, value = net.get_action(state)
+    done = False
+
+    while not done:
+        # Get action and entropy (now properly unpacking all 4 return values)
+        action, log_prob, value, entropy = net.get_action(state, deterministic=True)
         state, reward, done, _ = env.step(action)
-        env.render(window_name='test')
-        if env.already_crash:
-            break
+        env.render()
