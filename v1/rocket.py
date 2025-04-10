@@ -25,7 +25,7 @@ class Rocket(object):
     are smaller than a safe threshold and the angle is close to 90 degrees (upright),
     we see it as a successful landing.
     """
-    def __init__(self, max_steps, task='hover', rocket_type='falcon',
+    def __init__(self, max_steps, task='land', rocket_type='starship',
                  viewport_h=768, path_to_bg_img=None):
 
         self.task = task

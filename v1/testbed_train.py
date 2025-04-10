@@ -108,3 +108,4 @@ if __name__ == '__main__':
                 'use_entropy': use_entropy,
                 'alpha': alpha
             }, os.path.join(ckpt_folder, 'ckpt_' + str(episode_id).zfill(8) + '.pt'))
+            
