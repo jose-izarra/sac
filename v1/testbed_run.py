@@ -5,11 +5,12 @@ import os
 import glob
 
 # Decide which device we want to run on
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+# device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cpu")
 
 if __name__ == '__main__':
 
-    task = 'hover'   # 'hover' or 'landing'
+    # task = 'hover'   # 'hover' or 'landing'
     task = 'landing' # 'hover' or 'landing'
 
     max_steps = 800
@@ -21,7 +22,8 @@ if __name__ == '__main__':
 
     net = ActorCritic(input_dim=env.state_dims, output_dim=env.action_dims).to(device)
     if ckpt_dir and os.path.exists(ckpt_dir):
-        checkpoint = torch.load(ckpt_dir)
+        # Load checkpoint and map tensors to CPU
+        checkpoint = torch.load(ckpt_dir, weights_only=False, map_location=device)
         net.load_state_dict(checkpoint['model_G_state_dict'])
 
     state = env.reset()
@@ -31,4 +33,3 @@ if __name__ == '__main__':
         env.render(window_name='test')
         if env.already_crash:
             break
- 

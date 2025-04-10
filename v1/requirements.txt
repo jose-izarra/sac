@@ -4,3 +4,4 @@ torch
 matplotlib
 gymnasium
 stable-baselines3
+torchview
