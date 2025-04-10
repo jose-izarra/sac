@@ -33,10 +33,15 @@ if __name__ == '__main__':
     # Run simulation
     state, _ = env.reset()
     total_reward = 0
+    net.entropy_buffer = []  # Buffer to store entropy values
 
     print("\nStarting simulation...")
     for step_id in range(max_steps):
-        action, log_prob, value = net.get_action(state)
+        # Get action and entropy
+        action, log_prob, value, entropy = net.get_action(state)
+        net.entropy_buffer.append((action, log_prob, value, entropy))
+
+        # Take step in environment
         state, reward, terminated, truncated, info = env.step(action)
         total_reward += reward
 
@@ -45,6 +50,7 @@ if __name__ == '__main__':
         if terminated or truncated:
             print(f"\nEpisode finished after {step_id+1} steps")
             print(f"Total reward: {total_reward}")
+            print(f"Average entropy: {sum(e[3].item() for e in net.entropy_buffer) / len(net.entropy_buffer)}")
             break
 
     env.close()

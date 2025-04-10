@@ -1,16 +1,29 @@
 import random
 import numpy as np
 import torch
+import torch.nn.functional as F
 import utils
 import torch.optim as optim
-
 import torch.nn as nn
+from torch.distributions import Categorical
 
 # Decide which device we want to run on
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 def calculate_returns(next_value, rewards, masks, gamma=0.99):
+    """
+    Compute discounted returns with bootstrapping.
+
+    Args:
+        next_value: Bootstrap value for incomplete episode
+        rewards: List of rewards for each step
+        masks: List of masks (0 for terminal states, 1 otherwise)
+        gamma: Discount factor
+
+    Returns:
+        List of discounted returns
+    """
     R = next_value
     returns = []
     for step in reversed(range(len(rewards))):
@@ -35,9 +48,7 @@ class PositionalMapping(nn.Module):
         self.scale = scale
 
     def forward(self, x):
-
         x = x * self.scale
-
         if self.L == 0:
             return x
 
@@ -54,130 +65,163 @@ class PositionalMapping(nn.Module):
 
 class MLP(nn.Module):
     """
-    Multilayer perception with an embedded positional mapping (if L=0, then no positional mapping)
+    Multilayer perception with an embedded positional mapping
     """
-
     def __init__(self, input_dim, output_dim, hidden_layers=2, hidden_size=128, L=7):
         super().__init__()
-
         self.mapping = PositionalMapping(input_dim=input_dim, L=L)
 
-        k = 1; self.add_module('linear'+str(k),nn.Linear(in_features=self.mapping.output_dim, out_features=hidden_size, bias=True)) # input layer
-        for layer in range(hidden_layers):
-            k += 1; self.add_module('linear'+str(k),nn.Linear(in_features=hidden_size, out_features=hidden_size, bias=True))
-        k += 1; self.add_module('linear'+str(k),nn.Linear(in_features=hidden_size, out_features=output_dim, bias=True)) # output layer
-        self.layers = [module for module in self.modules() if isinstance(module,nn.Linear)]
+        # Input layer
+        k = 1
+        self.add_module('linear'+str(k), nn.Linear(in_features=self.mapping.output_dim, out_features=hidden_size, bias=True))
 
-        negative_slope = 0.2; self.relu = nn.LeakyReLU(negative_slope)
-        
+        # Hidden layers
+        for layer in range(hidden_layers):
+            k += 1
+            self.add_module('linear'+str(k), nn.Linear(in_features=hidden_size, out_features=hidden_size, bias=True))
+
+        # Output layer
+        k += 1
+        self.add_module('linear'+str(k), nn.Linear(in_features=hidden_size, out_features=output_dim, bias=True))
+
+        self.layers = [module for module in self.modules() if isinstance(module, nn.Linear)]
+        self.relu = nn.LeakyReLU(0.2)
+
         for child in self.named_children(): print(child)
         print(self.layers)
-        
 
-    def forward(self, x): # x: state
-        # shape x: 1 x m_token x m_state
+    def forward(self, x):
         x = x.view([1, -1])
         x = self.mapping(x)
         for k in range(len(self.layers)-1):
             x = self.relu(self.layers[k](x))
-        # final output layer
-        x = self.layers[-1](x)
-        """
-        in the case of the actor, the ouput layer has to be softmax-ed:
-        x = policy_dist 
-        x = F.softmax(self.layers[-1](x), dim=1)
-        """
-        return x
+        return self.layers[-1](x)
+
 
 GAMMA = 0.99
+ENTROPY_COEF = 0.01  # Entropy coefficient (β) controls exploration-exploitation trade-off
 
 class ActorCritic(nn.Module):
     """
-    RL policy and update rules
-    input_dim = num_inputs
-    output_dim = num_actions
+    Actor-Critic implementation with entropy regularization.
 
-    Default configuration:
-        hidden_layers=2
-        hidden_size=128 
-        positional mapping L=7
-        learning_rate = 5e-5
+    The actor (policy network) outputs action probabilities and the critic (value network)
+    estimates state values. Entropy regularization is added to encourage exploration.
 
-    Other configurations to be tried (for simpler problems):
-        hidden_layers=0
-        hidden_size=256 
-        No positional mapping L=0
-        learning_rate = 3e-4
+    Args:
+        input_dim: Dimension of state space
+        output_dim: Dimension of action space (number of discrete actions)
+        hidden_layers: Number of hidden layers in both actor and critic networks
+        hidden_size: Number of units in each hidden layer
+        L: Positional encoding parameter (0 for no encoding)
+        learning_rate: Learning rate for RMSprop optimizer
     """
-
     def __init__(self, input_dim, output_dim, hidden_layers=2, hidden_size=128, L=7, learning_rate=5e-5):
         super().__init__()
-
         self.output_dim = output_dim
-        self.actor  = MLP(input_dim=input_dim, output_dim=output_dim, # output = num_actions
-                          hidden_layers=hidden_layers, hidden_size=hidden_size, L=L)
-        self.critic = MLP(input_dim=input_dim, output_dim=1,          # output = scalar value
-                          hidden_layers=hidden_layers, hidden_size=hidden_size, L=L)
-        self.softmax = nn.Softmax(dim=-1)
 
+        # Actor and Critic networks
+        self.actor = MLP(input_dim=input_dim, output_dim=output_dim,
+                        hidden_layers=hidden_layers, hidden_size=hidden_size, L=L)
+        self.critic = MLP(input_dim=input_dim, output_dim=1,
+                         hidden_layers=hidden_layers, hidden_size=hidden_size, L=L)
+        self.softmax = nn.Softmax(dim=-1)
         self.optimizer = optim.RMSprop(self.parameters(), lr=learning_rate)
-        #              = optim.Adam(self.parameters(),    lr=learning_rate)
 
     def forward(self, x):
-        # shape x: batch_size x m_token x m_state
-        y = self.actor(x)
-        probs = self.softmax(y)
+        """
+        Forward pass through both actor and critic networks.
+        Returns action probabilities and state value estimate.
+        """
+        action_logits = self.actor(x)
+        probs = self.softmax(action_logits)
         value = self.critic(x)
-
         return probs, value
 
     def get_action(self, state, deterministic=False, exploration=0.01):
+        """
+        Select an action based on the current policy.
 
+        Args:
+            state: Current environment state
+            deterministic: If True, select best action; if False, sample from distribution
+            exploration: Probability of random action for epsilon-greedy exploration
+
+        Returns:
+            action_id: Selected action
+            log_prob: Log probability of selected action
+            value: Value estimate of current state
+            entropy: Entropy of the action distribution (for regularization)
+        """
         state = torch.tensor(state, dtype=torch.float32).unsqueeze(0).to(device)
         probs, value = self.forward(state)
         probs = probs[0, :]
         value = value[0]
 
+        # Create a proper probability distribution
+        dist = Categorical(probs)
+
         if deterministic:
-            action_id = np.argmax(np.squeeze(probs.detach().cpu().numpy()))
+            action_id = probs.argmax().item()
         else:
-            if random.random() < exploration:  # exploration
+            if random.random() < exploration:  # epsilon-greedy exploration
                 action_id = random.randint(0, self.output_dim - 1)
             else:
-                action_id = np.random.choice(self.output_dim, p=np.squeeze(probs.detach().cpu().numpy()))
+                action_id = dist.sample().item()
 
-        log_prob = torch.log(probs[action_id] + 1e-9)
+        log_prob = dist.log_prob(torch.tensor(action_id))
+        entropy = dist.entropy()
 
-        return action_id, log_prob, value
+        return action_id, log_prob, value, entropy
 
     @staticmethod
     def update_ac(network, rewards, log_probs, values, masks, Qval, gamma=GAMMA):
+        """
+        Update actor and critic networks using collected experience.
 
-        # compute Q values
+        Implements A2C with entropy regularization:
+        - Actor Loss = -log_prob * advantage - β * entropy
+        - Critic Loss = 0.5 * advantage²
+        - Total Loss = Actor Loss + Critic Loss
+
+        Args:
+            network: ActorCritic network to update
+            rewards: List of rewards from episode
+            log_probs: List of log probabilities of taken actions
+            values: List of value estimates
+            masks: List of done masks (0 for terminal states)
+            Qval: Bootstrap value for incomplete episode
+            gamma: Discount factor
+        """
+        # Compute Q values and advantages
         Qvals = calculate_returns(Qval.detach(), rewards, masks, gamma=gamma)
         Qvals = torch.tensor(Qvals, dtype=torch.float32).to(device).detach()
 
+        # Stack collected tensors
         log_probs = torch.stack(log_probs)
-        """
-        ⚠️ unstitched code⚠️
-        # In case of A2C to SAC:
-        policy_dist = probs # returned by self.forward()
-        dist = policy_dist.detach().numpy() 
-        entropy = -np.sum(np.mean(dist) * np.log(dist))
-        entropy_term += entropy
-        """
         values = torch.stack(values)
 
+        # Get policy distribution and compute entropy
         advantage = Qvals - values
+
+        # Compute losses with entropy regularization
         actor_loss = (-log_probs * advantage.detach()).mean()
         critic_loss = 0.5 * advantage.pow(2).mean()
-        ac_loss = actor_loss + critic_loss
-        """
-        ⚠️ unstitched code⚠️
-        # In case of A2C to SAC:
-        ac_loss = actor_loss + critic_loss + 0.001 * entropy_term
-        """
+
+        # Add entropy bonus (entropy maximization encourages exploration)
+        entropy_loss = -ENTROPY_COEF * torch.stack([step_output[3] for step_output in network.entropy_buffer]).mean()
+
+        # Combined loss
+        total_loss = actor_loss + critic_loss + entropy_loss
+
+        # Optimize
         network.optimizer.zero_grad()
-        ac_loss.backward()
+        total_loss.backward()
         network.optimizer.step()
 
+        return {
+            'actor_loss': actor_loss.item(),
+            'critic_loss': critic_loss.item(),
+            'entropy_loss': entropy_loss.item(),
+            'total_loss': total_loss.item()
+        }
